@@ -17,8 +17,28 @@ Require the submodule via composer, from site root:
 
 ```sh
 composer require silvershop/comparison
+
+This module's `main` branch targets Silverstripe 6 and SilverShop `dev-main`.
 ```
 
-## License
+## Running tests
 
+```sh
+vendor/bin/phpunit
+```
+
+## Static analysis
+
+```sh
+composer phpstan
+```
+
+### Include in Product template:
+``` <% include ProductSpecifications %>```
+
+With grouping enabled:
+
+``` <% include ProductSpecifications Grouping=1 %>```
+
+## License
 See LICENCE

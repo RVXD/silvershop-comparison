@@ -2,62 +2,76 @@
 
 namespace SilverShop\Comparison\Extension;
 
-use SilverStripe\ORM\DataExtension;
+use SilverShop\Comparison\GridField\GridFieldConfig_ProductFeatures;
+use SilverShop\Comparison\Model\Feature;
+use SilverShop\Comparison\Model\FeatureGroup;
+use SilverShop\Comparison\Model\ProductFeatureValue;
+use SilverShop\Comparison\Pagetypes\ProductComparisonPage;
+use SilverShop\Page\Product;
+use SilverStripe\Control\Controller;
+use SilverStripe\Control\HTTPRequest;
+use SilverStripe\Core\Config\Config;
+use SilverStripe\Core\Extension;
+use SilverStripe\Forms\DropdownField;
 use SilverStripe\Forms\FieldList;
 use SilverStripe\Forms\GridField\GridField;
-use SilverStripe\Forms\GridField\GridFieldConfig_RecordEditor;
-use SilverStripe\Forms\GridField\GridFieldDataColumns;
-use SilverStripe\Forms\GridField\GridFieldAddNewButton;
-use Symbiote\GridFieldExtensions\GridFieldAddNewInlineButton;
-use Symbiote\GridFieldExtensions\GridFieldEditableColumns;
-use Symbiote\GridFieldExtensions\GridFieldOrderableRows;
-use SilverStripe\Forms\DropdownField;
-use SilverShop\Comparison\Model\Feature;
-use SilverStripe\Forms\HiddenField;
-use SilverShop\Comparison\Pagetypes\ProductComparisonPage;
-use SilverShop\Comparison\Model\ProductFeatureValue;
+use SilverStripe\Model\List\ArrayList;
+use SilverStripe\ORM\HasManyList;
+use SilverStripe\Model\ArrayData;
 
-class ProductFeaturesExtension extends DataExtension
+/**
+ * Class ProductFeaturesExtension
+ *
+ * @package SilverShop\Comparison\Extension
+ *
+ * @method  HasManyList<ProductFeatureValue> Features()
+ * @extends Extension<(Product & static)>
+ */
+class ProductFeaturesExtension extends Extension
 {
-    private static $many_many = [
+    private static array $has_many = [
         'Features' => ProductFeatureValue::class
     ];
 
-    public function updateCMSFields(FieldList $fields) {
-        $fields->addFieldToTab("Root.Features",
-            $grid = GridField::create("Features", "Features", $this->owner->Features(),
-                GridFieldConfig_RecordEditor::create()
-            )
-        );
+    private static array $cascade_deletes = [
+        'Features',
+    ];
 
-        $grid->getConfig()
-            ->removeComponentsByType(GridFieldDataColumns::class)
-            ->removeComponentsByType(GridFieldAddNewButton::class)
-            ->addComponent(new GridFieldAddNewInlineButton())
-            ->addComponent(new GridFieldEditableColumns())
-            ->addComponent(new GridFieldOrderableRows());
+    private static array $cascade_duplicates = [
+        'Features',
+    ];
 
-        $grid->getConfig()->getComponentByType(GridFieldEditableColumns::class)->setDisplayFields(array(
-            'FeatureID'  => function($record, $column, $grid) {
-                $dropdown = new DropdownField($column, 'Feature', Feature::get()->map('ID', 'Title')->toArray());
-                $dropdown->addExtraClass('on_feature_select_fetch_value_field');
+    public function updateCMSFields(FieldList $fieldList): void
+    {
+        $gridFieldConfigProductFeatures = GridFieldConfig_ProductFeatures::create();
 
-                return $dropdown;
-            },
-            'Value' => function($record, $column, $grid) {
-                if($record->FeatureID) {
-                    $field = $record->Feature()->getValueField();
-                    $field->setName($column);
-
-                    return $field;
-                }
-
-                return new HiddenField($column);
+        if ($this->owner->exists()) {
+            $sortByGroup = Config::inst()->get(Feature::class, 'sort_features_by_group');
+            if ($sortByGroup) {
+                // SS6: sort() no longer accepts raw SQL / manually-joined columns.
+                // Use relation dot-notation so the ORM adds the joins itself.
+                $features = $this->owner->Features()->sort([
+                    'Feature.Group.Title' => 'ASC',
+                    'Feature.Sort' => 'ASC',
+                ]);
+            } else {
+                $features = $this->owner->Features();
             }
-        ));
+
+            $grid = GridField::create("Features", "Features", $features, $gridFieldConfigProductFeatures);
+            $fieldList->addFieldToTab("Root.Features", $grid);
+        }
+
+        // quick add all from feature group
+        $dropdownField = DropdownField::create('QuickAddFeatureGroupID', 'Add all features from group', FeatureGroup::get()->map('ID', 'Title'));
+        $dropdownField->setEmptyString('-');
+        $dropdownField->setDescription('After save, all features of selected group will be added to the product');
+
+        $fieldList->addFieldToTab('Root.Features', $dropdownField);
     }
 
-    public function CompareLink() {
+    public function CompareLink(): ?string
+    {
         if ($this->isCompared()) {
             return $this->CompareRemoveLink();
         }
@@ -65,27 +79,150 @@ class ProductFeaturesExtension extends DataExtension
         return $this->CompareAddLink();
     }
 
-    public function CompareAddLink() {
+    public function CompareAddLink(): ?string
+    {
         if ($page = ProductComparisonPage::get()->first()) {
-            return $page->Link("add/". $this->owner->ID);
+            return $page->Link("add/" . $this->owner->ID);
         }
+
+        return null;
     }
 
-    public function CompareRemoveLink() {
+    public function CompareRemoveLink(): ?string
+    {
         if ($page = ProductComparisonPage::get()->first()) {
-            return $page->Link("remove/". $this->owner->ID);
+            return $page->Link("remove/" . $this->owner->ID);
         }
+
+        return null;
     }
 
-    public function isCompared() {
-        $products = Controller::curr()->getSession()->get("ProductComparisons");
+    public function isCompared(): bool
+    {
+        $request = $this->getCurrentRequest();
+        $products = $request ? $request->getSession()->get('ProductComparisons') : null;
 
         if ($products) {
-            $products = explode(",", $products);
+            $products = explode(",", (string) $products);
 
-            return in_array($this->owner->ID, $products);
+            return in_array((string) $this->owner->ID, $products, true);
         }
 
         return false;
+    }
+
+    public function addAllFeaturesFromGroup($groupId): void
+    {
+        if ($group = FeatureGroup::get()->byID($groupId)) {
+            $features = $group->Features();
+            $sort = $this->owner->Features()->max('Sort') + 1;
+
+            foreach ($features as $feature) {
+                // add empty ProductFeatureValue if not present
+                if (!$this->owner->Features()->filter('FeatureID', $feature->ID)->first()) {
+                    // does not exist yet, so add
+                    $productFeatureValue = ProductFeatureValue::create();
+                    $productFeatureValue->FeatureID = $feature->ID;
+                    $productFeatureValue->ProductID = $this->owner->ID; // seems to be obsolete, item is linked via many_many
+                    $productFeatureValue->Sort = $sort;
+                    $productFeatureValue->write();
+                    $this->owner->Features()->add($productFeatureValue);
+                    $sort++;
+                }
+            }
+        }
+    }
+
+    /**
+     * Override features list with grouping.
+     */
+    public function GroupedFeatures($showungrouped = false): ArrayList
+    {
+        $features = $this->owner->Features()
+            ->innerJoin("SilverShop_Feature", "SilverShop_Feature.ID = SilverShop_ProductFeatureValue.FeatureID");
+
+        $featuresids = $features->getIDList();
+        if (empty($featuresids)) {
+            return ArrayList::create();
+        }
+
+        // check sorting option
+        $sortByGroup = Config::inst()->get(Feature::class, 'sort_features_by_group');
+
+        //figure out feature groups
+        $groups = FeatureGroup::get()
+            ->innerJoin("SilverShop_Feature", "SilverShop_Feature.GroupID = SilverShop_FeatureGroup.ID")
+            ->innerJoin("SilverShop_ProductFeatureValue", "SilverShop_Feature.ID = SilverShop_ProductFeatureValue.FeatureID")
+            ->where("SilverShop_ProductFeatureValue.ID IN (" . implode(',', $featuresids) . ")");
+
+        if ($sortByGroup) {
+            $groups = $groups->sort('Title ASC');
+        }
+
+        $groupids = $groups->getIDList();
+
+        //pack existing features into seperate lists
+        $arrayList = ArrayList::create();
+        if (!empty($groupids)) {
+            foreach ($groupids as $groupid) {
+                $group = FeatureGroup::get()->byID($groupid);
+                $children = $features->filter("GroupID", $groupid);
+                if ($sortByGroup) {
+                    // SS6: sort() can't order by the manually innerJoin'd SilverShop_Feature.Sort
+                    // column ("Invalid sort column") — sort the fetched records in PHP instead.
+                    $childArray = $children->toArray();
+                    usort($childArray, function ($a, $b) {
+                        $fa = $a->Feature();
+                        $fb = $b->Feature();
+                        return [(int) $fa->Sort, (string) $fa->Title] <=> [(int) $fb->Sort, (string) $fb->Title];
+                    });
+                    $children = ArrayList::create($childArray);
+                }
+
+                $arrayList->push(
+                    ArrayData::create(
+                        [
+                        'Group' => $group,
+                        'Children' => $children
+                        ]
+                    )
+                );
+            }
+
+            if ($showungrouped) {
+                $ungrouped = $features->filter("GroupID:not", $groupids);
+                if ($ungrouped->exists()) {
+                    $arrayList->push(
+                        ArrayData::create(
+                            [
+                            'Children' => $ungrouped
+                            ]
+                        )
+                    );
+                }
+            }
+        }
+
+        return $arrayList;
+    }
+
+    public function onAfterWrite(): void
+    {
+        $request = $this->getCurrentRequest();
+        $groupid = $request ? (int) $request->postVar('QuickAddFeatureGroupID') : 0;
+
+        if ($groupid > 0) {
+            $this->addAllFeaturesFromGroup($groupid);
+        }
+    }
+
+    protected function getCurrentRequest(): ?HTTPRequest
+    {
+        $controller = Controller::curr();
+        if (!$controller) {
+            return null;
+        }
+
+        return $controller->getRequest();
     }
 }

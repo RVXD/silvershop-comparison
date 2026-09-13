@@ -2,97 +2,146 @@
 
 namespace SilverShop\Comparison\Model;
 
-use SilverStripe\ORM\DataObject;
-use SilverStripe\Forms\FieldList;
-use SilverStripe\Forms\TextField;
-use SilverStripe\Forms\DropdownField;
+use SilverShop\Page\Product;
+use SilverStripe\Core\Config\Configurable;
 use SilverStripe\Forms\CheckboxField;
-use SilverStripe\Forms\NumericField;
+use SilverStripe\Forms\DropdownField;
+use SilverStripe\Forms\FieldList;
 use SilverStripe\Forms\LiteralField;
-use Boolean;
-use DBFloat;
-use Varchar;
+use SilverStripe\Forms\NumericField;
+use SilverStripe\Forms\TextField;
+use SilverStripe\ORM\DataObject;
+use SilverStripe\ORM\FieldType\DBBoolean;
+use SilverStripe\ORM\FieldType\DBFloat;
+use SilverStripe\ORM\FieldType\DBVarchar;
+use SilverStripe\ORM\HasManyList;
+use SilverStripe\ORM\ManyManyList;
 
-class Feature extends DataObject {
+/**
+ * @property string $Title
+ * @property ?string $Unit
+ * @property ?string $ValueType
+ * @property int $Sort
+ * @property int $GroupID
+ * @method   FeatureGroup Group()
+ * @method   HasManyList<Product> Products()
+ * @method   HasManyList<ProductFeatureValue> ProductFeatureValues()
+ * @method   ManyManyList<Product> Product()
+ */
+class Feature extends DataObject
+{
 
-    private static $db = [
+    use Configurable;
+
+    // if set to true, features are always sorted like they are within the FeatureGroup
+    private static bool $sort_features_by_group = false;
+
+    private static array $db = [
         'Title' => 'Varchar',
         'Unit' => 'Varchar',
-        'ValueType' => "Enum('Boolean,Number,String','String')"
+        'ValueType' => "Enum('Boolean,Number,String','String')",
+        'Sort' => 'Int'
     ];
 
-    private static $has_many = array(
-        "Products" => "Product_Feature"
-    );
+    private static array $has_many = [
+        "Products" => Product::class,
+        'ProductFeatureValues' => ProductFeatureValue::class
+    ];
 
-    private static $has_one = array(
-        "Group" => "FeatureGroup"
-    );
+    private static array $cascade_deletes = [
+        'ProductFeatureValues',
+    ];
 
-    private static $belongs_many_many = array(
-        "Product" => "Product"
-    );
+    private static array $cascade_duplicates = [
+        'ProductFeatureValues',
+    ];
 
-    private static $summary_fields = array(
+    private static array $has_one = [
+        "Group" => FeatureGroup::class
+    ];
+
+    private static array $belongs_many_many = [
+        "Product" => Product::class
+    ];
+
+    private static array $summary_fields = [
         "Title" => "Title",
         "Unit" => "Unit"
-    );
+    ];
 
-    private static $table_name = 'SilverShop_Feature';
+    private static string $default_sort = 'Sort ASC'; // sorting with in group
 
-    private static $singular_name = "Feature";
+    private static string $table_name = 'SilverShop_Feature';
 
-    private static $plural_name = "Features";
+    private static string $singular_name = "Feature";
 
-    public function getCMSFields() {
-        $fields = new FieldList(
+    private static string $plural_name = "Features";
+
+    public function getCMSFields(): FieldList
+    {
+        $fieldList = FieldList::create(
             TextField::create("Title"),
             TextField::create("Unit"),
-            DropdownField::create("ValueType","Value Type", $this->dbObject('ValueType')->enumValues())
+            DropdownField::create(
+                "ValueType",
+                "Value Type",
+                $this->dbObject('ValueType')->enumValues()
+            )
         );
 
-        $groups = FeatureGroup::get();
+        $featureGroupDataList = FeatureGroup::get();
 
-        if($groups->exists()) {
-            $fields->insertAfter(
-                DropdownField::create("GroupID","Group",$groups->map()->toArray())
+        if ($featureGroupDataList->exists()) {
+            $fieldList->insertAfter(
+                "Unit",
+                DropdownField::create("GroupID", "Group", $featureGroupDataList->map()->toArray())
                     ->setHasEmptyDefault(true)
-            ,"Unit");
+            );
         }
 
-        return $fields;
+        $this->extend('updateCMSFields', $fieldList);
+
+        return $fieldList;
     }
 
-    public function summaryFields() {
+    public function listTitle(): string
+    {
+        if ($this->Group()->exists()) {
+            return $this->Group()->Title . ' - ' . $this->Title;
+        }
+
+        return $this->Title;
+    }
+
+    public function summaryFields(): array
+    {
         $fields = parent::summaryFields();
 
-        if(FeatureGroup::get()->exists()){
+        if (FeatureGroup::get()->exists()) {
             $fields['Group.Title'] = 'Group';
         }
 
         return $fields;
     }
 
-    public function getValueField() {
-        $fields = array(
+    public function getValueField(): CheckboxField|NumericField|TextField|LiteralField
+    {
+        $fields = [
             'Boolean' => CheckboxField::create("Value"),
             'Number' => NumericField::create("Value"),
             'String' => TextField::create("Value")
-        );
+        ];
 
-        if(isset($fields[$this->ValueType])) {
-            return $fields[$this->ValueType];
-        } else {
-            return new LiteralField("Value", _t('Feature.SAVETOADDVALUE', 'Save record to add value.'));
-        }
+        return $fields[$this->ValueType] ?? LiteralField::create("Value", _t('Feature.SAVETOADDVALUE', 'Save record to add value.'));
     }
 
-    public function getValueDBField($value) {
-        $fields = array(
-            'Boolean' => new Boolean(),
-            'Number' => new DBFloat(),
-            'String' => new Varchar()
-        );
+    public function getValueDBField($value): DBBoolean|DBFloat|DBVarchar
+    {
+        $fields = [
+            'Boolean' => DBBoolean::create(),
+            'Number' => DBFloat::create(),
+            'String' => DBVarchar::create()
+        ];
         $field =  $fields[$this->ValueType];
         $field->setValue($value);
 
